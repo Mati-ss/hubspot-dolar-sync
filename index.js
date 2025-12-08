@@ -5,8 +5,8 @@ const HUBSPOT_TOKEN = process.env.HUBSPOT_TOKEN;
 const DOLAR_API_URL = "https://dolarapi.com/v1/dolares/oficial";
 
 // Nombres internos de propiedades en HubSpot
-const TC_PROPERTY = "tc_presupuesto_ars_usd";
-const FECHA_TC_PROPERTY = "fecha_tc_presupuesto";
+const TC_PROPERTY = "tipo_de_cambio_arsusd_historico";
+const FECHA_TC_PROPERTY = "fecha_del_tipo_de_cambio";
 // amount es la estándar de HubSpot para el valor del negocio
 
 // Ventana de tiempo para buscar deals actualizados recientemente (en minutos)
