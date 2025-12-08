@@ -1,1 +1,29 @@
+name: Actualizar tipo de cambio en deals HubSpot
+
+on:
+  schedule:
+    # Cada 10 minutos (ajustable)
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  sync-dolar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run sync script
+        env:
+          HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
+        run: npm start
 
