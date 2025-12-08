@@ -2,7 +2,6 @@ name: Actualizar tipo de cambio en deals HubSpot
 
 on:
   schedule:
-    # Cada 10 minutos (ajustable)
     - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
@@ -26,4 +25,5 @@ jobs:
         env:
           HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
         run: npm start
+
 
