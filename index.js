@@ -10,7 +10,7 @@ const FECHA_TC_PROPERTY = "fecha_del_tipo_de_cambio";
 // amount es la estándar de HubSpot para el valor del negocio
 
 // Ventana de tiempo para buscar deals actualizados recientemente (en minutos)
-const LOOKBACK_MINUTES = 10;
+const LOOKBACK_MINUTES = 6;
 
 // =============================
 
