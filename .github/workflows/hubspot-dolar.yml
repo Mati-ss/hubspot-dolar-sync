@@ -1,4 +1,4 @@
-name: Actualizar tipo de cambio en deals HubSpot
+name: Actualizar tipo de cambio en deals HubSpot v2
 
 on:
   schedule:
