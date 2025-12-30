@@ -1,25 +1,117 @@
 const axios = require("axios");
 
-// ======= CONFIGURACIÓN =======
+// ======= CONFIG =======
 const HUBSPOT_TOKEN = process.env.HUBSPOT_TOKEN;
+const HUBSPOT_BASE = "https://api.hubapi.com";
 const DOLAR_API_URL = "https://dolarapi.com/v1/dolares/oficial";
 
-// Nombres internos de propiedades en HubSpot
-const TC_PROPERTY = "tipo_de_cambio_arsusd_historico";
-const FECHA_TC_PROPERTY = "fecha_del_tipo_de_cambio";
-// amount es la estándar de HubSpot para el valor del negocio
+const TC_PROPERTY = "tc_presupuesto_ars_usd";
+const FECHA_TC_PROPERTY = "fecha_tc_presupuesto";
 
-// Ventana de tiempo para buscar deals actualizados recientemente (en minutos)
 const LOOKBACK_MINUTES = 10;
+const MAX_RETRIES = 6;
+// ======================
 
-// =============================
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isCloudflareBlock(status, data) {
+  if (status !== 403) return false;
+  const text = typeof data === "string" ? data : JSON.stringify(data || "");
+  const t = text.toLowerCase();
+  return (
+    t.includes("cloudflare") ||
+    t.includes("error 1006") ||
+    t.includes("access denied") ||
+    t.includes("banned your ip address")
+  );
+}
+
+async function requestWithRetry(config) {
+  let lastErr;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await axios.request({
+        timeout: 20000,
+        validateStatus: () => true, // manejamos nosotros status codes
+        ...config,
+      });
+    } catch (err) {
+      lastErr = err;
+      const backoff = Math.min(30000, 2000 * 2 ** (attempt - 1)) + Math.random() * 1500;
+      console.log(`[http] Network error: ${err.message}. Reintentando en ${(backoff/1000).toFixed(1)}s (${attempt}/${MAX_RETRIES})`);
+      await sleep(backoff);
+    }
+
+    // si fue excepción de red, ya reintentó arriba
+    // el resto (status codes) se maneja abajo cuando hay respuesta
+  }
+
+  throw lastErr || new Error("requestWithRetry: falló sin error explícito");
+}
+
+async function hubspotRequest(method, path, body) {
+  const url = `${HUBSPOT_BASE}${path}`;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const res = await requestWithRetry({
+      method,
+      url,
+      headers: {
+        Authorization: `Bearer ${HUBSPOT_TOKEN}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      data: body,
+    });
+
+    // OK
+    if (res.status >= 200 && res.status < 300) return res.data;
+
+    // 429 rate limit
+    if (res.status === 429) {
+      const ra = res.headers?.["retry-after"];
+      const waitMs = (ra ? Number(ra) * 1000 : 2000 * 2 ** (attempt - 1)) + Math.random() * 1500;
+      console.log(`[hubspot] 429 rate limit. Reintentando en ${(waitMs/1000).toFixed(1)}s (${attempt}/${MAX_RETRIES})`);
+      await sleep(waitMs);
+      continue;
+    }
+
+    // 403 Cloudflare block (HTML)
+    if (isCloudflareBlock(res.status, res.data)) {
+      const waitMs = Math.min(120000, 10000 * attempt) + Math.random() * 3000;
+      console.log(`[hubspot] 403 Cloudflare/1006. Reintentando en ${(waitMs/1000).toFixed(1)}s (${attempt}/${MAX_RETRIES})`);
+      await sleep(waitMs);
+      continue;
+    }
+
+    // 5xx transient
+    if (res.status >= 500 && res.status < 600) {
+      const waitMs = Math.min(30000, 2000 * 2 ** (attempt - 1)) + Math.random() * 1500;
+      console.log(`[hubspot] ${res.status} server error. Reintentando en ${(waitMs/1000).toFixed(1)}s (${attempt}/${MAX_RETRIES})`);
+      await sleep(waitMs);
+      continue;
+    }
+
+    // otros 4xx -> error real (token, permisos, payload)
+    const preview =
+      typeof res.data === "string"
+        ? res.data.slice(0, 500)
+        : JSON.stringify(res.data).slice(0, 500);
+
+    throw new Error(`${method} ${path} -> ${res.status} | ${preview}`);
+  }
+
+  throw new Error(`${method} ${path} -> falló tras ${MAX_RETRIES} reintentos`);
+}
 
 async function obtenerTipoCambio() {
-  const resp = await axios.get(DOLAR_API_URL, { timeout: 10000 });
-  const data = resp.data;
-  // Elegimos el valor de venta (podés cambiar a compra o promedio)
+  const res = await axios.get(DOLAR_API_URL, { timeout: 15000 });
+  const data = res.data;
   const tc = data.venta;
-  const fechaIso = data.fechaActualizacion; // formato ISO
+  const fechaIso = data.fechaActualizacion;
   return { tc, fechaIso };
 }
 
@@ -30,16 +122,6 @@ function fechaHaceMinutos(min) {
 }
 
 async function buscarDealsModificadosRecientemente() {
-  const url = "https://api.hubapi.com/crm/v3/objects/deals/search";
-
-  const headers = {
-    Authorization: `Bearer ${HUBSPOT_TOKEN}`,
-    "Content-Type": "application/json",
-  };
-
-  // Buscamos deals cuyo hs_lastmodifieddate sea dentro de los últimos X minutos
-  const haceUnRato = fechaHaceMinutos(LOOKBACK_MINUTES);
-
   const body = {
     filterGroups: [
       {
@@ -47,7 +129,7 @@ async function buscarDealsModificadosRecientemente() {
           {
             propertyName: "hs_lastmodifieddate",
             operator: "GTE",
-            value: haceUnRato,
+            value: fechaHaceMinutos(LOOKBACK_MINUTES),
           },
         ],
       },
@@ -56,32 +138,21 @@ async function buscarDealsModificadosRecientemente() {
     limit: 100,
   };
 
-  const resp = await axios.post(url, body, { headers, timeout: 15000 });
-  return resp.data.results || [];
+  return await hubspotRequest("POST", "/crm/v3/objects/deals/search", body);
 }
 
 async function actualizarDealsEnLote(deals, tc, fechaIso) {
   if (!deals.length) return;
 
-  const url = "https://api.hubapi.com/crm/v3/objects/deals/batch/update";
-
-  const headers = {
-    Authorization: `Bearer ${HUBSPOT_TOKEN}`,
-    "Content-Type": "application/json",
-  };
-
   const inputs = deals.map((deal) => ({
     id: deal.id,
     properties: {
       [TC_PROPERTY]: tc.toString(),
-      [FECHA_TC_PROPERTY]: fechaIso.split("T")[0] // solo fecha YYYY-MM-DD
+      [FECHA_TC_PROPERTY]: fechaIso.split("T")[0],
     },
   }));
 
-  const body = { inputs };
-
-  const resp = await axios.post(url, body, { headers, timeout: 20000 });
-  return resp.data;
+  await hubspotRequest("POST", "/crm/v3/objects/deals/batch/update", { inputs });
 }
 
 async function main() {
@@ -90,15 +161,19 @@ async function main() {
       throw new Error("Falta la variable de entorno HUBSPOT_TOKEN");
     }
 
+    // Jitter para evitar picos sincronizados
+    const jitterMs = Math.floor(Math.random() * 20000);
+    await sleep(jitterMs);
+
     console.log("Obteniendo tipo de cambio desde dolarapi...");
     const { tc, fechaIso } = await obtenerTipoCambio();
     console.log(`TC actual: ${tc} ARS/USD - Fecha: ${fechaIso}`);
 
     console.log(`Buscando deals modificados en los últimos ${LOOKBACK_MINUTES} minutos...`);
-    const deals = await buscarDealsModificadosRecientemente();
+    const searchRes = await buscarDealsModificadosRecientemente();
+    const deals = searchRes?.results || [];
     console.log(`Deals encontrados: ${deals.length}`);
 
-    // Podrías filtrar aquí solo los deals que tengan amount no vacío
     const dealsConAmount = deals.filter((d) => {
       const amount = d.properties?.amount;
       return amount !== null && amount !== undefined && amount !== "";
@@ -106,7 +181,6 @@ async function main() {
 
     console.log(`Deals con amount no vacío: ${dealsConAmount.length}`);
 
-    // Si tienes más de 100, podrías paginar. Para arrancar, asumimos <=100 por ciclo.
     if (!dealsConAmount.length) {
       console.log("No hay deals para actualizar.");
       return;
@@ -123,4 +197,3 @@ async function main() {
 }
 
 main();
-
